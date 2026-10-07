@@ -1,0 +1,58 @@
+param([switch]$SplitOnly)
+$ErrorActionPreference='Stop'
+$root=Split-Path -Parent $PSScriptRoot
+$version=(Get-Content -LiteralPath (Join-Path $root 'VERSION') -Raw).Trim()
+$stage=Join-Path $root ('dist\StreetChem-Solo-v'+$version)
+$payload=@(
+ @{source='native\build\StreetChemHost.dll';dest='payload/cyberpunk/red4ext/plugins/StreetChem/StreetChemHost.dll'},
+ @{source='native\build\StreetChemRender.addon64';dest='payload/cyberpunk/bin/x64/StreetChemRender.addon64'},
+ @{source='native\StreetChemLab.fx';dest='payload/cyberpunk/bin/x64/streetchem/shaders/StreetChemLab.fx'},
+ @{source='host\StreetChemCity.reds';dest='payload/cyberpunk/r6/scripts/StreetChem/StreetChemCity.reds'},
+ @{source='host\StreetChemVisual.reds';dest='payload/cyberpunk/r6/scripts/StreetChem/StreetChemVisual.reds'},
+ @{source='host\StreetChemRunners.reds';dest='payload/cyberpunk/r6/scripts/StreetChem/StreetChemRunners.reds'},
+ @{source='host\StreetChemConsumables.reds';dest='payload/cyberpunk/r6/scripts/StreetChem/StreetChemConsumables.reds'},
+ @{source='host\StreetChemDealer.reds';dest='payload/cyberpunk/r6/scripts/StreetChem/StreetChemDealer.reds'},
+ @{source='guest\bin\Release\net6.0\StreetChem.Guest.dll';dest='payload/schedule-i/Mods/StreetChem.Guest.dll'}
+)
+foreach($row in $payload){if(!(Test-Path -LiteralPath (Join-Path $root $row.source))){throw "Build first. Missing: $($row.source)"}}
+if(!$SplitOnly){
+if(Test-Path -LiteralPath $stage){throw "Package stage already exists: $stage. Use a fresh version or move it aside."}
+New-Item -ItemType Directory -Path $stage -Force | Out-Null
+foreach($name in @('README.md','CHANGELOG.md','CREDITS.md','LICENSE','THIRD_PARTY_NOTICES.md','VERSION')){Copy-Item -LiteralPath (Join-Path $root $name) -Destination (Join-Path $stage $name)}
+Copy-Item -LiteralPath (Join-Path $root 'docs') -Destination (Join-Path $stage 'docs') -Recurse
+foreach($name in @('Install.ps1','Restore.ps1')){Copy-Item -LiteralPath (Join-Path $root ('installer\'+$name)) -Destination (Join-Path $stage $name)}
+New-Item -ItemType Directory -Path (Join-Path $stage 'tools\IconCooker') -Force|Out-Null
+Copy-Item -LiteralPath (Join-Path $root 'tools\BuildLocalIcons.ps1') -Destination (Join-Path $stage 'tools\BuildLocalIcons.ps1')
+foreach($name in @('IconCooker.dll','IconCooker.deps.json','IconCooker.runtimeconfig.json')){
+ $converter=Join-Path $root ('tools\IconCooker\bin\Release\net10.0\'+$name)
+ if(!(Test-Path -LiteralPath $converter)){throw 'Build the IconCooker with WolvenKitDir before packaging.'}
+ Copy-Item -LiteralPath $converter -Destination (Join-Path $stage ('tools\IconCooker\'+$name))
+}
+foreach($name in @('Program.cs','IconCooker.csproj','LICENSE')){Copy-Item -LiteralPath (Join-Path $root ('tools\IconCooker\'+$name)) -Destination (Join-Path $stage ('tools\IconCooker\'+$name))}
+foreach($row in $payload){$dest=Join-Path $stage $row.dest;New-Item -ItemType Directory -Path (Split-Path -Parent $dest) -Force | Out-Null;Copy-Item -LiteralPath (Join-Path $root $row.source) -Destination $dest}
+$rows=Get-ChildItem -LiteralPath $stage -File -Recurse | ForEach-Object {@{path=[IO.Path]::GetRelativePath($stage,$_.FullName).Replace('\','/');sha256=(Get-FileHash -LiteralPath $_.FullName).Hash}}
+$rows | Sort-Object path | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $stage 'FILES.json')
+$zip=Join-Path $root ('dist\StreetChem-Solo-v'+$version+'.zip')
+Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip
+$hash=(Get-FileHash -LiteralPath $zip).Hash
+($hash+'  '+[IO.Path]::GetFileName($zip)) | Set-Content -LiteralPath ($zip+'.sha256')
+Write-Output "$zip ($hash)"
+}
+# Game-root archives for mod managers that assign one archive to one game.
+foreach($game in @(@{name='Cyberpunk2077';prefix='payload/cyberpunk/';count=8},@{name='ScheduleI';prefix='payload/schedule-i/';count=1})){
+ $name='StreetChem-'+$game.name+'-v'+$version
+ $gameStage=Join-Path $root ('dist\'+$name)
+ $gameZip=$gameStage+'.zip'
+ if((Test-Path -LiteralPath $gameStage) -or (Test-Path -LiteralPath $gameZip)){throw "Split package already exists: $name. Move it aside before repackaging."}
+ $selected=@($payload | Where-Object {$_.dest.StartsWith($game.prefix)})
+ if($selected.Count -ne $game.count){throw "Unexpected $($game.name) payload count"}
+ foreach($row in $selected){
+  $target=Join-Path $gameStage $row.dest.Substring($game.prefix.Length)
+  New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force | Out-Null
+  Copy-Item -LiteralPath (Join-Path $root $row.source) -Destination $target
+ }
+ Compress-Archive -Path (Join-Path $gameStage '*') -DestinationPath $gameZip
+ $hash=(Get-FileHash -LiteralPath $gameZip).Hash
+ ($hash+'  '+[IO.Path]::GetFileName($gameZip)) | Set-Content -LiteralPath ($gameZip+'.sha256')
+ Write-Output "$gameZip ($hash)"
+}
